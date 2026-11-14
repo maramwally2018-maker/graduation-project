@@ -1,0 +1,667 @@
+{
+  "name": "Signal-to-Pipeline Engine WF1",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyHour"
+            }
+          ]
+        },
+        "feedUrl": "https://news.google.com/rss/search?q=startup+funding+round&hl=en-US&gl=US&ceid=US:en"
+      },
+      "type": "n8n-nodes-base.rssFeedReadTrigger",
+      "typeVersion": 1,
+      "position": [
+        688,
+        464
+      ],
+      "id": "da7cfaa2-d2f9-434f-8aae-db4955281145",
+      "name": "RSS Feed Trigger",
+      "disabled": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1152,
+        -112
+      ],
+      "id": "8bd767aa-ec5e-416c-b1a8-bf3230aa0f34",
+      "name": "Merge: Unified Stream"
+    },
+    {
+      "parameters": {
+        "jsCode": "const newItems = [];\n\nfor (const item of $input.all()) {\n  const job = item.json;\n  \n  // تغطية كل الاحتمالات الشائعة لأسماء المفاتيح من Apify/LinkedIn\n  const companyName = job.companyName || job.company || job.company_name || \"Needs manual review\";\n  const jobTitle = job.title || job.jobTitle || job.position || \"New Job Posting\";\n  const jobUrl = job.link || job.url || job.jobUrl;\n  const postDate = job.postedAt || job.date || new Date().toISOString();\n\n  newItems.push({\n    json: {\n      company_name: companyName,\n      domain: null, \n      signal_type: \"Hiring\",\n      detected_date: postDate,\n      evidence_description: jobTitle,\n      evidence_url: jobUrl\n    }\n  });\n}\n\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        0
+      ],
+      "id": "c90a7aab-f03c-4099-a56d-ea23b368d1a1",
+      "name": "Parser: Clean Hiring"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO accounts (account_name, domain)\nVALUES (\n    NULLIF($1, ''), \n    NULLIF(NULLIF($2, ''), 'null')\n)\nON CONFLICT (account_name) \nDO UPDATE SET domain = COALESCE(accounts.domain, EXCLUDED.domain)\nRETURNING account_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.company_name, $json.domain] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1344,
+        -112
+      ],
+      "id": "472db196-3ee1-4128-a1f4-958b1f1d3bc2",
+      "name": "DB 1: Upsert Account (Get ID)",
+      "credentials": {
+        "postgres": {
+          "id": "lhdWoEtGXRC6f6Xg",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS (\n    SELECT 1 \n    FROM signals \n    WHERE account_id = $1 \n      AND signal_type = $2 \n      AND detected_date >= NOW() - INTERVAL '30 days'\n) AS is_duplicate;",
+        "options": {
+          "queryReplacement": "={{ $json.account_id }}, {{ $('Merge: Unified Stream').item.json.signal_type }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1536,
+        -112
+      ],
+      "id": "040d6353-e7ec-407d-9ef1-b89b9b301465",
+      "name": "DB 2: Check Dedup (30 Days)",
+      "credentials": {
+        "postgres": {
+          "id": "lhdWoEtGXRC6f6Xg",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8a50be93-18cc-4018-a12c-956cbb455359",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1744,
+        -112
+      ],
+      "id": "b21e25bf-b335-4f4c-85e1-9934bcb2c0e6",
+      "name": "Router: Is Unique?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO signals (account_id, signal_type, detected_date, evidence_description, evidence_url, status)\nVALUES ($1, $2, $3, $4, $5, 'Pending_Enrichment');",
+        "options": {
+          "queryReplacement": "={{ $('DB 1: Upsert Account (Get ID)').item.json.account_id }}, {{ $('Merge: Unified Stream').item.json.signal_type }}, {{ $('Merge: Unified Stream').item.json.detected_date }}, {{ $('Merge: Unified Stream').item.json.evidence_description }}, {{ $('Merge: Unified Stream').item.json.evidence_url }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1984,
+        -128
+      ],
+      "id": "cdf93da1-8965-482e-8d91-fc754094f7ba",
+      "name": "DB 3: Insert Signal & Set Pending",
+      "credentials": {
+        "postgres": {
+          "id": "lhdWoEtGXRC6f6Xg",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const newItems = [];\n\nfor (const item of $input.all()) {\n  const rawTitle = item.json.title || '';\n\n  // تنظيف اسم المصدر في نهاية العنوان\n  const cleanTitle = rawTitle.replace(/\\s*-\\s*[A-Za-z .]+$/, '').trim();\n\n  let companyName = null;\n  \n  // تحديث الأنماط لتشمل الحالات الإخبارية العامة\n  const patterns = [\n    // 1. البحث عن كلمات التمويل المباشرة\n    /([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})\\s+(?:raises|secures|closes|lands|nets|bags|scores|gets)/i,\n    // 2. البحث عن كلمة شركة أو شركة ناشئة\n    /(?:startup|company)\\s+([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})/i,\n    // 3. (النمط الجديد) سحب أول كلمة أو كلمتين تبدأ بحرف كبير في بداية العنوان\n    /^([A-Z][\\w&.-]+(?:\\s+[A-Z][\\w&.-]+)?)/\n  ];\n  \n  for (const re of patterns) {\n    const m = cleanTitle.match(re);\n    if (m && m[1]) { \n        companyName = m[1].trim(); \n        break; \n    }\n  }\n  \n  if (!companyName) companyName = 'Needs manual review';\n\n  newItems.push({\n    json: {\n      company_name: companyName,\n      domain: null, \n      signal_type: 'Funding',\n      detected_date: item.json.isoDate, \n      evidence_description: cleanTitle, \n      evidence_url: item.json.link\n    }\n  });\n}\n\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        -272
+      ],
+      "id": "6d0bab2c-c60f-4049-8874-c342c496f40b",
+      "name": "Parser: Clean Funding"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        256,
+        -272
+      ],
+      "id": "92b91573-f90e-4a1c-9f38-283eeef0c8c2",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        688,
+        -272
+      ],
+      "id": "83279ab5-290d-4fb1-8a0b-eaafb232f0e8",
+      "name": "RSS Read",
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1232,
+        624
+      ],
+      "id": "c83ed196-5147-4dad-a18f-5f6170166448",
+      "name": "Merge: Unified Stream1",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const newItems = [];\n\nfor (const item of $input.all()) {\n  // التعديل الجذري هنا: قراءة البيانات من body إن وجد، أو من الجذر المباشر للـ json\n  const payload = item.json.body || item.json || {};\n\n  const companyName = payload.company_name || payload.company || 'Needs manual review';\n  const domain = payload.domain || payload.website || null; \n  \n  const jobTitle = payload.job_title || payload.role || 'New position';\n  const evidenceDescription = `Hiring for: ${jobTitle}`;\n  \n  const evidenceUrl = payload.url || payload.job_url || payload.link || '';\n  \n  const detectedDate = payload.timestamp || new Date().toISOString();\n\n  newItems.push({\n    json: {\n      company_name: companyName,\n      domain: domain, \n      signal_type: 'Hiring',\n      detected_date: detectedDate,\n      evidence_description: evidenceDescription,\n      evidence_url: evidenceUrl\n    }\n  });\n}\n\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        736
+      ],
+      "id": "db8ce775-85a4-40ba-b827-64e834f2e189",
+      "name": "Parser: Clean Hiring1",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO accounts (account_name, domain)\nVALUES ($1, $2)\nON CONFLICT (domain) \nDO UPDATE SET account_name = COALESCE(EXCLUDED.account_name, accounts.account_name)\nRETURNING account_id;",
+        "options": {
+          "queryReplacement": "={{ $json.company_name }}, {{ $json.domain }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1424,
+        624
+      ],
+      "id": "5f6024ab-886d-4f77-b1f1-fddee9a596e4",
+      "name": "DB 1: Upsert Account (Get ID)1",
+      "credentials": {
+        "postgres": {
+          "id": "lhdWoEtGXRC6f6Xg",
+          "name": "Postgres account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS (\n    SELECT 1 \n    FROM signals \n    WHERE account_id = $1 \n      AND signal_type = $2 \n      AND detected_date >= NOW() - INTERVAL '30 days'\n) AS is_duplicate;",
+        "options": {
+          "queryReplacement": "={{ $json.account_id }}, {{ $('Merge: Unified Stream1').item.json.signal_type }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1616,
+        624
+      ],
+      "id": "fefff116-acf0-4be8-9004-17720a97be83",
+      "name": "DB 2: Check Dedup (30 Days)1",
+      "credentials": {
+        "postgres": {
+          "id": "lhdWoEtGXRC6f6Xg",
+          "name": "Postgres account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "8a50be93-18cc-4018-a12c-956cbb455359",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1824,
+        624
+      ],
+      "id": "211cb85a-4f96-4b6f-9fda-97ffd1511dba",
+      "name": "Router: Is Unique?1",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO signals (account_id, signal_type, detected_date, evidence_description, evidence_url, status)\nVALUES ($1, $2, $3, $4, $5, 'Pending_Enrichment');",
+        "options": {
+          "queryReplacement": "={{ $('DB 1: Upsert Account (Get ID)1').item.json.account_id }}, {{ $('Merge: Unified Stream1').item.json.signal_type }}, {{ $('Merge: Unified Stream1').item.json.detected_date }}, {{ $('Merge: Unified Stream1').item.json.evidence_description }}, {{ $('Merge: Unified Stream1').item.json.evidence_url }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2064,
+        608
+      ],
+      "id": "ce25f319-5a23-481d-a333-3d4462a945f9",
+      "name": "DB 3: Insert Signal & Set Pending1",
+      "credentials": {
+        "postgres": {
+          "id": "lhdWoEtGXRC6f6Xg",
+          "name": "Postgres account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const newItems = [];\n\nfor (const item of $input.all()) {\n  const rawTitle = item.json.title || '';\n\n  // شيل أي اسم مصدر في الآخر زي \" - Reuters\" أو \" - TechCrunch\"\n  const cleanTitle = rawTitle.replace(/\\s*-\\s*[A-Za-z .]+$/, '').trim();\n\n  // محاولة استخراج اسم الشركة بأكتر من طريقة\n  let companyName = null;\n  const patterns = [\n    /startup\\s+([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})/,\n    /company\\s+([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})/,\n    /([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})\\s+(?:raises|secures|closes|lands|nets|bags|scores|gets)/i,\n  ];\n  \n  for (const re of patterns) {\n    const m = cleanTitle.match(re);\n    if (m) { companyName = m[1].trim(); break; }\n  }\n  if (!companyName) companyName = 'Needs manual review';\n\n  // إنشاء هيكل الـ JSON الجديد واستبعاد كل الحقول القديمة من الـ RSS\n  newItems.push({\n    json: {\n      company_name: companyName,\n      domain: null, // نعطيه قيمة فارغة هنا ليتم تعبئته لاحقاً في مسار الإثراء\n      signal_type: 'Funding',\n      detected_date: item.json.isoDate, \n      evidence_description: cleanTitle, \n      evidence_url: item.json.link\n    }\n  });\n}\n\n// إرجاع المصفوفة النظيفة فقط\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        464
+      ],
+      "id": "b8bef0aa-a4a0-42ba-a253-3d1fe7e50fc5",
+      "name": "Parser: Clean Funding1",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "bfcd80cb-e759-451f-ac0c-4212293bab9e",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        704,
+        736
+      ],
+      "id": "3950bfb1-6cc7-4d73-98f8-be6f3a133d3f",
+      "name": "Webhook1",
+      "webhookId": "bfcd80cb-e759-451f-ac0c-4212293bab9e",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  { \n    json: { url: \"https://techcrunch.com/feed/\" } \n  },\n  { \n    json: { url: \"https://news.google.com/rss/search?q=startup+funding&hl=en-US&gl=US&ceid=US:en\" } \n  }\n\n  //add new link\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        -272
+      ],
+      "id": "700a5202-252f-4289-9cd7-b0997e06a118",
+      "name": "Load Feed URLs"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.body.resource.storages.datasets.default.apiUrl }}/items",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "apify_api_LwIR59BTf6UufdGPhoEDfcmiCxbSXm3AM1aV"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        704,
+        0
+      ],
+      "id": "9bdfa3fe-8102-40ef-bbdc-1c0b75b7da25",
+      "name": "Fetch: Apify Dataset"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "bfcd80cb-e759-451f-ac0c-4212293bab9e",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        496,
+        0
+      ],
+      "id": "dbdc73fb-bcf5-4ee5-823d-363e5089be8e",
+      "name": "Trigger: Apify Webhook",
+      "webhookId": "bfcd80cb-e759-451f-ac0c-4212293bab9e"
+    },
+    {
+      "parameters": {
+        "jsCode": "const newItems = [];\n\nfor (const item of $input.all()) {\n  const rawTitle = item.json.title || '';\n\n  // شيل أي اسم مصدر في الآخر زي \" - Reuters\" أو \" - TechCrunch\"\n  const cleanTitle = rawTitle.replace(/\\s*-\\s*[A-Za-z .]+$/, '').trim();\n\n  // محاولة استخراج اسم الشركة بأكتر من طريقة\n  let companyName = null;\n  const patterns = [\n    /startup\\s+([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})/,\n    /company\\s+([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})/,\n    /([A-Z][\\w&.-]*(?:\\s+[A-Z][\\w&.-]*){0,2})\\s+(?:raises|secures|closes|lands|nets|bags|scores|gets)/i,\n  ];\n  \n  for (const re of patterns) {\n    const m = cleanTitle.match(re);\n    if (m) { companyName = m[1].trim(); break; }\n  }\n  if (!companyName) companyName = 'Needs manual review';\n\n  // إنشاء هيكل الـ JSON الجديد واستبعاد كل الحقول القديمة من الـ RSS\n  newItems.push({\n    json: {\n      company_name: companyName,\n      domain: null, // نعطيه قيمة فارغة هنا ليتم تعبئته لاحقاً في مسار الإثراء\n      signal_type: 'Funding',\n      detected_date: item.json.isoDate, \n      evidence_description: cleanTitle, \n      evidence_url: item.json.link\n    }\n  });\n}\n\n// إرجاع المصفوفة النظيفة فقط\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        656
+      ],
+      "id": "8ac1da1e-5e2e-46dc-8a4a-a99e349f0e14",
+      "name": "Parser: Clean Funding2",
+      "disabled": true
+    }
+  ],
+  "pinData": {
+    "Webhook1": [
+      {
+        "json": {
+          "company_name": "TechFlow Solutions",
+          "domain": "techflow.io",
+          "job_title": "Senior Flutter Developer",
+          "url": "https://techflow.io/careers/123",
+          "timestamp": "2026-10-05T19:30:00Z"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "RSS Feed Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parser: Clean Funding1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser: Clean Hiring": {
+      "main": [
+        [
+          {
+            "node": "Merge: Unified Stream",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge: Unified Stream": {
+      "main": [
+        [
+          {
+            "node": "DB 1: Upsert Account (Get ID)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB 1: Upsert Account (Get ID)": {
+      "main": [
+        [
+          {
+            "node": "DB 2: Check Dedup (30 Days)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB 2: Check Dedup (30 Days)": {
+      "main": [
+        [
+          {
+            "node": "Router: Is Unique?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router: Is Unique?": {
+      "main": [
+        [
+          {
+            "node": "DB 3: Insert Signal & Set Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser: Clean Funding": {
+      "main": [
+        [
+          {
+            "node": "Merge: Unified Stream",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Feed URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS Read": {
+      "main": [
+        [
+          {
+            "node": "Parser: Clean Funding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge: Unified Stream1": {
+      "main": [
+        [
+          {
+            "node": "DB 1: Upsert Account (Get ID)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser: Clean Hiring1": {
+      "main": [
+        [
+          {
+            "node": "Merge: Unified Stream1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "DB 1: Upsert Account (Get ID)1": {
+      "main": [
+        [
+          {
+            "node": "DB 2: Check Dedup (30 Days)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB 2: Check Dedup (30 Days)1": {
+      "main": [
+        [
+          {
+            "node": "Router: Is Unique?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Router: Is Unique?1": {
+      "main": [
+        [
+          {
+            "node": "DB 3: Insert Signal & Set Pending1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser: Clean Funding1": {
+      "main": [
+        [
+          {
+            "node": "Merge: Unified Stream1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "Parser: Clean Hiring1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Feed URLs": {
+      "main": [
+        [
+          {
+            "node": "RSS Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch: Apify Dataset": {
+      "main": [
+        [
+          {
+            "node": "Parser: Clean Hiring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger: Apify Webhook": {
+      "main": [
+        [
+          {
+            "node": "Fetch: Apify Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "2fdd5f2d-9a21-4eb8-8b7a-047836554f44",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "20c6b70ba329a03ae1de2be94912815a44b52d795666572e7af1dc914dc43535"
+  },
+  "nodeGroups": [],
+  "id": "FMklOKuiB73rMcZs",
+  "tags": []
+}

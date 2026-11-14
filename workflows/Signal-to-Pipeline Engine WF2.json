@@ -1,0 +1,1005 @@
+{
+  "name": "Data Enrichment | Apollo Company + Clay Contacts | Supabase | Production V2",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "1e2350bc-6e1e-4462-a5ba-523368213a1a",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "16a66ddb-cff3-4924-be95-2149366d6809",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  a.account_id,\n  a.domain,\n  a.account_name,\n  s.status,\n  s.signal_id,\n  s.signal_type,\n  s.detected_date,\n  s.evidence_description,\n  s.evidence_url,\n  s.signal_strength\nFROM accounts a\nJOIN signals s ON s.account_id = a.account_id\nWHERE s.status = 'Pending_Enrichment'\nORDER BY s.detected_date DESC NULLS LAST, s.signal_id DESC\nLIMIT 50;",
+        "options": {}
+      },
+      "id": "0ec23175-048b-4e72-b5b2-02c38977f643",
+      "name": "Get Enrichment_Pending",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        320
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "yCAQyZazbOLEtA52",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{!$json.domain || String($json.domain).trim() === ''}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "chk-dom-1"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d36c54ac-cbf8-43bd-a687-e48f7235c147",
+      "name": "Domain Missing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        368,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://autocomplete.clearbit.com/v1/companies/suggest",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{$json.account_name}}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "e043b8b3-11f2-4f10-b666-5d068646b970",
+      "name": "Clearbit | Get Domain",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        528,
+        208
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Domain Missing?').item.json;\n\n// 1. فحص ما إذا كانت النتيجة قادمة كـ Object مباشر من Clearbit\nlet foundDomain = $json.domain || null;\n\n// 2. إذا كانت النتيجة قادمة كـ Array\nif (!foundDomain && Array.isArray($json) && $json.length > 0) {\n  foundDomain = $json[0].domain;\n} else if (!foundDomain && $json.data && $json.data.length > 0) {\n  foundDomain = $json.data[0].domain;\n}\n\nreturn [{\n  json: {\n    ...src,\n    domain: foundDomain || src.domain || null\n  }\n}];"
+      },
+      "id": "61010dd8-10bb-41e2-8792-836eb4cde00a",
+      "name": "Extract Clearbit Domain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE accounts\nSET domain = COALESCE($2, domain)\nWHERE account_id = $1\nRETURNING account_id, domain;",
+        "options": {
+          "queryReplacement": "={{[$json.account_id,$json.domain]}}"
+        }
+      },
+      "id": "0daef6bb-05be-4dc6-b91c-6550f40667b8",
+      "name": "Supabase | Update Domain",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        848,
+        208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "yCAQyZazbOLEtA52",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const j = item.json;\n  \n  // جلب البيانات الأصلية من قاعدة البيانات مباشرة عبر مطابقة account_id لتجنب فقدانها في النود السابقة\n  const dbItems = $('Get Enrichment_Pending').all();\n  const matchedDbItem = dbItems.find(db => String(db.json.account_id) === String(j.account_id));\n  const dbSignalType = matchedDbItem ? matchedDbItem.json.signal_type : '';\n\n  const rawType = String(\n    j.signal_type || \n    dbSignalType || \n    j['Signal Type'] || \n    ''\n  ).trim();\n  \n  const t = rawType.toLowerCase();\n\n  const isHiring = /hiring|hire|job|recruit|headcount/.test(t);\n  const isFunding = /fund|funding|investment|invested|series|seed|round/.test(t);\n\n  const signalType = isHiring ? 'Hiring' : isFunding ? 'Funding' : (rawType || 'Unknown');\n\n  const targetTitles = isHiring\n    ? ['CTO', 'VP of Engineering', 'Head of Talent']\n    : isFunding\n    ? ['Founder', 'CEO', 'Managing Director']\n    : ['Founder', 'CEO', 'CTO'];\n\n  const domain = String(j.domain || '')\n    .trim()\n    .replace(/^https?:\\/\\//i, '')\n    .replace(/^www\\./i, '')\n    .replace(/\\/$/, '');\n\n  return {\n    json: {\n      ...j,\n      domain,\n      signal_type_normalized: signalType,\n      target_titles: targetTitles\n    }\n  };\n});"
+      },
+      "id": "17b36f94-a86a-46d2-9a91-998569e26371",
+      "name": "Normalize Input & Routing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.apollo.io/api/v1/organizations/enrich",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "domain",
+              "value": "={{$json.domain}}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "x-api-key",
+              "value": "=XjqRH-NBfS5cGe0hHzTxvQ"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "d6bc42f0-7368-49b9-bb3a-2b11f1948749",
+      "name": "Apollo | Enrich Company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.organization &&$json.organization.id ? 'yes' : 'no'}}",
+              "rightValue": "yes",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "e903e9cc-aae6-422f-8417-8216129c4894"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2c3abb10-5898-4da6-962e-732f633491c4",
+      "name": "Apollo Response OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Normalize Input & Routing').item.json;\nconst org = $json.organization || {};\nconst techs = Array.isArray(org.current_technologies)\n  ? org.current_technologies.map(x => typeof x === 'string' ? x : x?.name).filter(Boolean)\n  : (Array.isArray(org.technology_names) ? org.technology_names.filter(Boolean) : []);\nconst employees = Number(org.estimated_num_employees);\nlet companySize = null;\nif (Number.isFinite(employees) && employees > 0) {\n  if (employees <= 50) companySize = '1-50';\n  else if (employees <= 200) companySize = '51-200';\n  else if (employees <= 500) companySize = '201-500';\n  else if (employees <= 1000) companySize = '501-1000';\n  else if (employees <= 5000) companySize = '1001-5000';\n  else companySize = '5000+';\n}\nconst funding = Array.isArray(org.funding_events) ? org.funding_events : [];\nconst latestFunding = funding.length ? funding[funding.length-1] : null;\nconst geo = org.country || org.location?.country || org.primary_location?.country || null;\n\nreturn [{json:{\n  account_id: src.account_id,\n  domain: src.domain,\n  signal_id: src.signal_id,\n  signal_type: src.signal_type || src.signal_type_normalized || null,\n  target_titles: src.target_titles,\n  detected_date: src.detected_date,\n  evidence_description: src.evidence_description,\n  evidence_url: src.evidence_url,\n  signal_strength: src.signal_strength,\n  account_name: org.name || null,\n  industry: org.industry || (Array.isArray(org.industries) ? org.industries[0] : null),\n  company_size: companySize,\n  geography: geo,\n  growth_stage: org.latest_funding_stage || latestFunding?.type || null,\n  tech_stack: [...new Set(techs)],\n  apollo_organization_id: org.id || null\n}}];"
+      },
+      "id": "ce145d2b-4ebf-4b70-bb54-ff250eee8379",
+      "name": "Map Company Contract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE accounts\nSET\n  account_name = COALESCE($2, account_name),\n  domain = COALESCE($3, domain),\n  industry = COALESCE($4, industry),\n  company_size = COALESCE($5, company_size),\n  geography = COALESCE($6, geography),\n  growth_stage = COALESCE($7, growth_stage),\n  tech_stack = CASE WHEN $8 IS NULL THEN tech_stack ELSE $8::text[] END\nWHERE account_id = $1\nRETURNING account_id, account_name, domain, industry, company_size, geography, growth_stage, tech_stack;",
+        "options": {
+          "queryReplacement": "={{[$json.account_id,$json.account_name,$json.domain,$json.industry,$json.company_size,$json.geography,$json.growth_stage,$json.tech_stack ? '{' + $json.tech_stack.map(x => '\"' + String(x).replace(/\"/g,'\\\\\"') + '\"').join(',') + '}' : null]}}"
+        }
+      },
+      "id": "ba12455f-5096-4c57-b385-261697630891",
+      "name": "Supabase | Upsert Account Enrichment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1888,
+        320
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "yCAQyZazbOLEtA52",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Map Company Contract').item.json;\nreturn items.map(item => ({json:{...src, ...item.json}}));"
+      },
+      "id": "1bbc081f-8150-4334-a853-0780a82992c1",
+      "name": "Reattach Signal Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2112,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-aa16f534-c297-4378-a45f-7fb7a5cbbad6",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  correlation_id: String($json.account_id) + ':' + String($json.signal_id || ''),\n  account_id:$json.account_id,\n  domain: $json.domain,\n  account_name:$json.account_name,\n  signal_type: $json.signal_type || 'Unknown',\n  target_titles:$json.target_titles || [],\n  callback_url: 'https://cytoplasm-tycoon-ranked.ngrok-free.dev/webhook/clay-contact-callback-v2',\n  attempt: 1,\n  max_attempts: 3\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "0d248c7f-2af7-4389-a4b4-9bdbde02c996",
+      "name": "Clay | Request Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2320,
+        320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item=>({json:{...item.json, clay_request_sent:true, next_step:'Waiting for Clay callback'}}));"
+      },
+      "id": "4a21794a-239c-4723-95af-0d23e0753435",
+      "name": "Queue | Clay Request Accepted",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2544,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clay-contact-callback-v2",
+        "options": {}
+      },
+      "id": "fbb57a86-9431-46cc-ba7f-d5ec650f2ab1",
+      "name": "Clay Callback Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        864
+      ],
+      "webhookId": "clay-contact-callback-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\n\nconst firstName = body.first_name ? body.first_name.trim() : '';\nconst lastName = body.last_name ? body.last_name.trim() : '';\nconst fullName = `${firstName} ${lastName}`.trim() || null;\n\nreturn [\n  {\n    json: {\n      account_id: body.account_id ? Number(body.account_id) : null,\n      contact_name: fullName,\n      email: body.email || null,\n      job_role: body.title || body.job_role || null,\n      domain: body.domain || null,\n      linkedin_url: body.linkedin_url || null\n    }\n  }\n];"
+      },
+      "id": "b8dadc85-792d-4468-8a8e-510500dfd743",
+      "name": "Normalize Clay Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.email || ''}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              },
+              "id": "64c6c630-5fd8-4233-9482-bbf665b1616b"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e9402329-0f7b-4dc0-beca-5bcca7ec4d73",
+      "name": "Email Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api-eu.zerobounce.net/v2/validate",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "=16e176cd7f8f49d8811cfec039f60c13"
+            },
+            {
+              "name": "email",
+              "value": "={{$json.email}}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "69f95ae7-ab09-475a-b64f-e5d13861f50e",
+      "name": "ZeroBounce | Validate Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        768
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $('Normalize Clay Callback').item.json;\nreturn [{json:{...original, verification_status:String($json.status||'').toLowerCase(), verification_sub_status:String($json.sub_status||'').toLowerCase(), zerobounce_address:$json.address||original.email}}];"
+      },
+      "id": "029709f5-fb21-48a8-9cd5-c4bc75a29eb9",
+      "name": "Merge Contact + Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.verification_status}}",
+              "rightValue": "valid",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "56322aef-4601-40a7-982a-ec874f4bd478"
+            },
+            {
+              "leftValue": "={{$json.verification_sub_status}}",
+              "rightValue": "catch-all",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              },
+              "id": "0c4cd20f-fe7f-45c7-af8f-22192570927e"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5eb23b14-ef05-4964-9df6-41f86aabb2bd",
+      "name": "Email Deliverable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inserted AS (\n  INSERT INTO contacts (account_id, contact_name, email, job_role)\n  VALUES (\n    {{ $json.account_id }},\n    {{ $json.contact_name ? \"'\" + $json.contact_name.replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n    {{ $json.email ? \"'\" + $json.email.replace(/'/g, \"''\") + \"'\" : \"NULL\" }},\n    {{ $json.job_role ? \"'\" + $json.job_role.replace(/'/g, \"''\") + \"'\" : \"NULL\" }}\n  )\n  ON CONFLICT DO NOTHING\n  RETURNING account_id\n),\neligible AS (\n  SELECT account_id FROM inserted\n  UNION\n  SELECT account_id FROM contacts WHERE account_id = {{ $json.account_id }} LIMIT 1\n)\nUPDATE accounts a\nSET status = 'Ready_for_Scoring'\nWHERE a.account_id = {{$json.account_id }}\n  AND EXISTS (SELECT 1 FROM eligible e WHERE e.account_id = a.account_id)\nRETURNING a.account_id, a.status;",
+        "options": {}
+      },
+      "id": "8442eea0-0a63-4009-85cf-7357b05f503a",
+      "name": "Supabase | Insert Contact + Mark Ready",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1440,
+        688
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "yCAQyZazbOLEtA52",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(i=>({json:{...$('Merge Contact + Verification').item.json, db_status:i.json.status||'Scoring_for_Ready'}}));"
+      },
+      "id": "4e91e802-b0a0-4a45-a704-c5e92dd4c694",
+      "name": "Valid Contact Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{Number($json.attempt || 1)}}",
+              "rightValue": "={{Number($json.max_attempts || 3)}}",
+              "operator": {
+                "type": "number",
+                "operation": "smaller"
+              },
+              "id": "164cab07-e1e8-424a-b3fa-cc4966664fa0"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5e3bf77c-41fa-4e1c-9c1a-f204a4a09351",
+      "name": "Contact Retry Decision",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        1008
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-aa16f534-c297-4378-a45f-7fb7a5cbbad6",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{$env.CLAY_AUTH_HEADER || ''}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {correlation_id:String($json.account_id)+':'+String($json.signal_id||''), account_id:$json.account_id, signal_id:$json.signal_id, domain:$json.domain, signal_type:$json.signal_type || null, target_titles:$json.target_titles || [], exclude_contact_id:$json.clay_contact_id || null, exclude_email:$json.email || null, callback_url:$env.N8N_PUBLIC_URL + '/webhook/clay-contact-callback-v2', attempt:Number($json.attempt||1)+1, max_attempts:Number($json.max_attempts||3)} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "390947aa-cc3b-4b31-9c30-1642e4eee346",
+      "name": "Clay | Request Alternate Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        1008
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE accounts SET status = 'Enrichment_Pending' WHERE account_id = {{$json.account_id}} RETURNING account_id, status;",
+        "options": {}
+      },
+      "id": "63eb2cfc-8dfa-444f-a8eb-40ab76e9fdb1",
+      "name": "No Valid Contact | Keep Pending",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        960,
+        1200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "yCAQyZazbOLEtA52",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(i=>({json:{...i.json, contact_enrichment_result:'stopped_after_max_attempts'}}));"
+      },
+      "id": "41a4964b-2e9f-4ac7-91e5-0ac5c037f946",
+      "name": "Retry/Stop Outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE accounts SET status = 'Enrichment_Pending' WHERE account_id = {{ $('Normalize Input & Routing').item.json.account_id }} RETURNING account_id, status;",
+        "options": {}
+      },
+      "id": "d95b59bb-ec53-4101-9490-080a40822cb5",
+      "name": "Apollo Failed | Keep Pending",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1440,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "yCAQyZazbOLEtA52",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items;"
+      },
+      "id": "c2400688-c0b9-4513-ac64-f2e65eb0ab02",
+      "name": "Validate Clay Callback Secret",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "content": "REQUIRED BEFORE PRODUCTION\n1) Create PostgreSQL credential named 'Supabase Postgres' and attach it to every Postgres node.\n2) Set env vars: APOLLO_API_KEY, CLAY_CONTACT_WEBHOOK_URL, CLAY_AUTH_HEADER (optional), CLAY_CALLBACK_SECRET (recommended), ZEROBOUNCE_API_KEY, N8N_PUBLIC_URL, FINAL_READY_STATUS.\n3) FINAL_READY_STATUS must match the real DB status value. Default: Scoring_for_Ready.\n4) Clay workflow must POST callback JSON to /webhook/clay-contact-callback-v2 with account_id, signal_id, attempt, max_attempts, domain, signal_type, target_titles, contacts[].\n5) Do not store API keys/passwords in this workflow JSON.\n\n### Database trigger behavior\nThis workflow is intentionally started by the n8n Schedule Trigger (polling). Every run reads accounts where status = Enrichment_Pending and joins the latest signal from signals. The upstream signal workflow writes the signal/account first; this workflow then picks it up automatically on the next polling cycle. Manual Trigger is kept only for testing."
+      },
+      "id": "2f041d4d-c594-4dbb-9725-c72821a11403",
+      "name": "NOTE | Required n8n configuration",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "CLAY INPUT CONTRACT\nPOST to CLAY_CONTACT_WEBHOOK_URL:\n{account_id, signal_id, domain, account_name, signal_type, target_titles, callback_url, attempt, max_attempts}\n\nCLAY CALLBACK CONTRACT:\n{account_id, signal_id, domain, signal_type, target_titles, attempt, max_attempts, contacts:[{contact_id,first_name,last_name,contact_name,title,job_role,email,work_email}]}\n\nClay should honor exclude_contact_id/exclude_email on retry and return a different contact."
+      },
+      "id": "c554b927-48f5-4bf5-815b-8a582857f5af",
+      "name": "NOTE | Clay contract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1360
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Enrichment_Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Enrichment_Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Enrichment_Pending": {
+      "main": [
+        [
+          {
+            "node": "Domain Missing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Domain Missing?": {
+      "main": [
+        [
+          {
+            "node": "Clearbit | Get Domain",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Input & Routing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clearbit | Get Domain": {
+      "main": [
+        [
+          {
+            "node": "Extract Clearbit Domain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Clearbit Domain": {
+      "main": [
+        [
+          {
+            "node": "Supabase | Update Domain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase | Update Domain": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input & Routing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input & Routing": {
+      "main": [
+        [
+          {
+            "node": "Apollo | Enrich Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo | Enrich Company": {
+      "main": [
+        [
+          {
+            "node": "Apollo Response OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo Response OK?": {
+      "main": [
+        [
+          {
+            "node": "Map Company Contract",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Apollo Failed | Keep Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Company Contract": {
+      "main": [
+        [
+          {
+            "node": "Supabase | Upsert Account Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase | Upsert Account Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Reattach Signal Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reattach Signal Context": {
+      "main": [
+        [
+          {
+            "node": "Clay | Request Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clay | Request Contacts": {
+      "main": [
+        [
+          {
+            "node": "Queue | Clay Request Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clay Callback Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Clay Callback Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Clay Callback Secret": {
+      "main": [
+        [
+          {
+            "node": "Normalize Clay Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Clay Callback": {
+      "main": [
+        [
+          {
+            "node": "Email Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Available?": {
+      "main": [
+        [
+          {
+            "node": "ZeroBounce | Validate Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Contact Retry Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ZeroBounce | Validate Email": {
+      "main": [
+        [
+          {
+            "node": "Merge Contact + Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Contact + Verification": {
+      "main": [
+        [
+          {
+            "node": "Email Deliverable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Deliverable?": {
+      "main": [
+        [
+          {
+            "node": "Supabase | Insert Contact + Mark Ready",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Contact Retry Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase | Insert Contact + Mark Ready": {
+      "main": [
+        [
+          {
+            "node": "Valid Contact Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact Retry Decision": {
+      "main": [
+        [
+          {
+            "node": "Clay | Request Alternate Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Valid Contact | Keep Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Valid Contact | Keep Pending": {
+      "main": [
+        [
+          {
+            "node": "Retry/Stop Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "1918b416-916b-4d3f-b0e8-a1297987d06f",
+  "meta": {
+    "instanceId": "723288492143219be91244d66cf576066d200cb98cdcb9b59fffe72615463bc0"
+  },
+  "nodeGroups": [],
+  "id": "EAlIaqThcq2o0Tf5",
+  "tags": []
+}

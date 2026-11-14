@@ -1,0 +1,613 @@
+{
+  "name": "DEPI Workflow 4 - Message Generation & Human Approval",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "58edc125-d718-44aa-a6cf-a7c14c2272d0",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nWITH picked AS (\n    SELECT id\n    FROM leads\n    WHERE status = 'Ready_for_Messaging'\n    ORDER BY id\n    LIMIT 1\n    FOR UPDATE SKIP LOCKED\n)\nUPDATE leads AS l\nSET status = 'Drafting'\nFROM picked\nWHERE l.id = picked.id\nRETURNING l.*;\n",
+        "options": {}
+      },
+      "id": "83a74d0d-65a5-4a3c-a64d-b1dd33cfafa9",
+      "name": "Fetch and Lock Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        224,
+        208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2000001-0000-4000-8000-000000000001",
+              "leftValue": "={{ Boolean($json.company_name && String($json.company_name).trim() && $json.contact_name && String($json.contact_name).trim() && $json.research_brief && String($json.research_brief).trim().length > 20) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "48ebaad0-da3c-4c24-b523-c164bb8ac9f7",
+      "name": "Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        416,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an expert B2B outreach copywriter.\n\nCompany: {{ $json.company_name }}\nContact: {{ $json.contact_name }}\nResearch brief: {{ $json.research_brief }}\n\nWrite a cold email body made of a one-line greeting \"Hi <first name>,\" on its own line, followed by EXACTLY 4 sentences:\n1. Sentence 1: State the trigger (funding or hiring), using a specific fact taken from the research brief.\n2. Sentence 2: Bridge the trigger to a likely pain point.\n3. Sentence 3: Introduce our value proposition.\n4. Sentence 4: A low-friction call to action (e.g., \"Worth a 10-minute chat?\").\n\nRules:\n- Use only facts from the research brief. Do not invent numbers, names, or claims.\n- No buzzwords. Maximum 90 words after the greeting.\n- No signature, no square brackets, no placeholders.\n- Write a short, specific subject line (under 8 words).\n\nReturn the subject line and the body.",
+        "hasOutputParser": true
+      },
+      "id": "fd468024-de45-47cf-b068-1026422105dc",
+      "name": "Draft Email (LLM Chain)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        528,
+        -128
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "62f85e5a-190e-4f5a-aa29-8097e72e442c",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        656,
+        240
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"subject\": { \"type\": \"string\" },\n    \"body\": { \"type\": \"string\" }\n  },\n  \"required\": [\"subject\", \"body\"]\n}"
+      },
+      "id": "039f6563-7835-446c-9eeb-e3f84cee1d76",
+      "name": "Structured Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [
+        800,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Fetch and Lock Leads').first().json;\nconst out = $input.first().json.output || {};\nconst subject = String(out.subject || '').trim();\nconst body = String(out.body || '').trim();\n// strip the greeting line (Hi Sara,) before counting\nconst core = body.replace(/^(hi|hello|hey|dear)\\b[^\\n]*\\n+/i, '').trim();\nconst reasons = [];\n\nif (!subject) reasons.push('empty subject');\nelse if (subject.split(/\\s+/).length > 8) reasons.push('subject too long');\nif (!core) reasons.push('empty body');\n\nconst sentences = core.replace(/\\b(Inc|Ltd|Co|Corp|Dr|Mr|Ms|Mrs|vs|etc)\\./g, '$1').split(/(?<=[.!?])\\s+/).filter(s => s.trim());\nif (sentences.length !== 4) reasons.push('expected 4 sentences, got ' + sentences.length);\n\nconst words = core.split(/\\s+/).filter(Boolean).length;\nif (words > 90) reasons.push('body has ' + words + ' words (max 90)');\n\nif (/\\[[^\\]]*\\]|\\{\\{|\\}\\}|<[^>]+>|\\bREPLACE_ME\\b|\\blorem ipsum\\b|\\bTBD\\b/.test(subject + ' ' + body)) reasons.push('placeholder found');\n\nconst firstName = String(lead.contact_name || '').trim().split(/\\s+/)[0].toLowerCase();\nif (firstName && !body.toLowerCase().includes(firstName)) reasons.push('contact first name missing');\n\n// every number in the email must exist in the research brief (\"10-minute\" CTA is allowed)\nconst norm = s => String(s).replace(/,/g, '');\nconst brief = norm(lead.research_brief || '');\nconst stripped = core.replace(/\\b\\d+[-\\s]?(minute|min)s?\\b/gi, '');\nconst nums = (stripped.match(/\\d+(?:[.,]\\d+)*/g) || []).map(norm);\nconst missing = nums.filter(n => !brief.includes(n));\nif (missing.length) reasons.push('numbers not in research brief: ' + missing.join(', '));\n\nreturn [{ json: { valid: reasons.length === 0, reason: reasons.join('; '), subject, body } }];"
+      },
+      "id": "c8714e0d-d70c-4f03-8f16-51cc489bd20a",
+      "name": "Validate Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2000001-0000-4000-8000-000000000002",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aea23a1c-2802-44a7-8b36-faec617f14bc",
+      "name": "Draft Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1232,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET draft_subject = $1,\n    draft_body = $2,\n    request_id = $3,\n    status = 'Pending_Approval'\nWHERE id = $4\n  AND status = 'Drafting'\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ [ $json.subject, $json.body, 'req-' + $execution.id + '-' + $('Fetch and Lock Leads').first().json.id, $('Fetch and Lock Leads').first().json.id ] }}"
+        }
+      },
+      "id": "de8444e4-d06c-4ce2-b02f-cb5ff5429dc7",
+      "name": "Save Draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1408,
+        -192
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "mgB16PVvR9eljTHd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "chatId": "-1003792495876",
+        "message": "=🔔 *Approval required*\n\nRequest ID: {{ $('Save Draft').first().json.request_id }}\nCompany: {{ $('Fetch and Lock Leads').first().json.company_name }}\nContact: {{ $('Fetch and Lock Leads').first().json.contact_name }}\nAI Score: {{ $('Fetch and Lock Leads').first().json.ai_scoring }}/100\n\n*Subject:* {{ $('Validate Draft').first().json.subject }}\n\n{{ $('Validate Draft').first().json.body }}\n\nChoose Approve or Reject below.",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "disapproveLabel": "❌ Reject"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "resumeAmount": 48
+            }
+          },
+          "appendAttribution": false
+        }
+      },
+      "id": "d0609779-1875-416c-96ef-0cc1b0a19fae",
+      "name": "Telegram Approval",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1920,
+        304
+      ],
+      "webhookId": "workflow4-approval",
+      "credentials": {
+        "telegramApi": {
+          "id": "qATnWSI7hrHaqLYn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2000001-0000-4000-8000-000000000003",
+              "leftValue": "={{ $json.data?.approved === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "860ccddc-35f8-445c-8afd-fcd3daed66e7",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2256,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2000001-0000-4000-8000-000000000004",
+              "leftValue": "={{ $json.data === undefined || $json.data === null || $json.data.approved === undefined }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8c6a49d6-15fb-4ec6-854f-ed83df43f5d6",
+      "name": "Timed Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2320,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET status = 'Approval_Timeout',\n    review_decision = 'timeout',\n    reviewed_at = NOW()\nWHERE id = $1\n  AND status = 'Pending_Approval'\n  AND request_id = $2\nRETURNING id, status, request_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Fetch and Lock Leads').first().json.id, $('Save Draft').first().json.request_id ] }}"
+        }
+      },
+      "id": "84ae95df-6c24-48e1-9541-3fe0d2c81700",
+      "name": "Mark Approval_Timeout",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2736,
+        448
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "mgB16PVvR9eljTHd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET status = 'Rejected_by_Human',\n    review_decision = 'rejected',\n    reviewed_at = NOW()\nWHERE id = $1\n  AND status = 'Pending_Approval'\n  AND request_id = $2\nRETURNING id, status, request_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Fetch and Lock Leads').first().json.id, $('Save Draft').first().json.request_id ] }}"
+        }
+      },
+      "id": "cf63ef31-5444-4acb-bab7-2302b55694ac",
+      "name": "Mark Rejected",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2752,
+        608
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "mgB16PVvR9eljTHd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET status = 'Draft_Failed',\n    error_reason = $2\nWHERE id = $1\n  AND status IN ('Drafting', 'Pending_Approval');",
+        "options": {
+          "queryReplacement": "={{ [ $('Fetch and Lock Leads').first().json.id, String($json.reason || $json.error?.message || $json.error || (($json.research_brief && $json.contact_name) ? 'unknown' : 'missing contact_name or research_brief')).slice(0, 500) ] }}"
+        }
+      },
+      "id": "a860dfb5-d093-4a04-8712-d69cdd94586e",
+      "name": "Mark Draft_Failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "mgB16PVvR9eljTHd",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "ALTER TABLE leads ADD COLUMN IF NOT EXISTS draft_subject TEXT;\nALTER TABLE leads ADD COLUMN IF NOT EXISTS draft_body TEXT;\nALTER TABLE leads ADD COLUMN IF NOT EXISTS request_id VARCHAR(128);\nALTER TABLE leads ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(64);\nALTER TABLE leads ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;\nALTER TABLE leads ADD COLUMN IF NOT EXISTS review_decision VARCHAR(32);\nALTER TABLE leads ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;\nALTER TABLE leads ADD COLUMN IF NOT EXISTS error_reason TEXT;\nCREATE UNIQUE INDEX IF NOT EXISTS leads_request_id_unique ON leads(request_id) WHERE request_id IS NOT NULL;",
+        "options": {}
+      },
+      "id": "79ac5c34-edb6-46bc-881d-453110aefc8c",
+      "name": "DB Migration (Manual - run once if needed)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        224,
+        720
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "mgB16PVvR9eljTHd",
+          "name": "Postgres account"
+        }
+      },
+      "disabled": true,
+      "notes": "Manual schema migration only. Enable/run only after confirming the leads table exists and your DB user has ALTER privileges. Does not insert sample data."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET finalized_email = $1,\n    status = 'Approved_for_Sending',\n    review_decision = 'approved',\n    reviewed_at = NOW()\nWHERE id = $2\n  AND status = 'Pending_Approval'\n  AND request_id = $3\nRETURNING id, status, request_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Validate Draft').first().json.body, $('Fetch and Lock Leads').first().json.id, $('Save Draft').first().json.request_id ] }}"
+        }
+      },
+      "id": "e75a9525-3149-486b-b72a-0f884b801ad1",
+      "name": "Mark Approved",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2736,
+        256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "mgB16PVvR9eljTHd",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch and Lock Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch and Lock Leads": {
+      "main": [
+        [
+          {
+            "node": "Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "Draft Email (LLM Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Draft_Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Draft Email (LLM Chain)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Draft Email (LLM Chain)",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft Email (LLM Chain)": {
+      "main": [
+        [
+          {
+            "node": "Validate Draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Draft_Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Draft": {
+      "main": [
+        [
+          {
+            "node": "Draft Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft Valid?": {
+      "main": [
+        [
+          {
+            "node": "Save Draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Draft_Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Draft": {
+      "main": [
+        [
+          {
+            "node": "Telegram Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Approval": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Mark Approved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Timed Out?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Timed Out?": {
+      "main": [
+        [
+          {
+            "node": "Mark Approval_Timeout",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "36b48568-f364-4c33-b8c3-4e317df9ec2d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "cac88575abd1c5f169a6a4ca6c0983dbe39935022719b10f13ce35e22ab8bbce"
+  },
+  "nodeGroups": [],
+  "id": "zgWpofXGpkpRfX5M",
+  "tags": []
+}

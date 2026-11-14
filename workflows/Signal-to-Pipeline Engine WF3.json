@@ -1,0 +1,401 @@
+{
+  "name": "Workflow 3 - AI Research & Scoring (Fixed)",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 224],
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    a.account_id,\n    a.account_name,\n    a.domain,\n    a.industry,\n    a.company_size,\n    a.geography,\n    a.growth_stage,\n    a.tech_stack,\n    a.status,\n\n    s.signal_id,\n    s.signal_type,\n    s.detected_date,\n    s.evidence_description,\n    s.evidence_url,\n    s.signal_strength,\n\n    c.contact_id,\n    c.contact_name,\n    c.job_role\n\nFROM accounts AS a\n\nINNER JOIN signals AS s\n    ON s.account_id = a.account_id\n\nLEFT JOIN contacts AS c\n    ON c.account_id = a.account_id\n\nWHERE LOWER(TRIM(COALESCE(a.status, ''))) IN ('ready_for_scoring', 'enrichment_pending')\n\nORDER BY\n    s.detected_date DESC NULLS LAST,\n    a.account_id DESC\n\nLIMIT 100;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [192, 224],
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rows are ordered by detected_date DESC, so the first row seen per account holds its latest signal.\nconst aggregatedData = {};\n\nfor (const item of $input.all()) {\n  const row = item.json;\n\n  if (!aggregatedData[row.account_id]) {\n    aggregatedData[row.account_id] = {\n      account: {\n        account_id: row.account_id,\n        account_name: row.account_name,\n        domain: row.domain,\n        industry: row.industry,\n        company_size: row.company_size,\n        geography: row.geography,\n        growth_stage: row.growth_stage,\n        tech_stack: row.tech_stack,\n        status: row.status\n      },\n      signal: {\n        signal_id: row.signal_id,\n        signal_type: row.signal_type,\n        detected_date: row.detected_date,\n        evidence_description: row.evidence_description,\n        evidence_url: row.evidence_url,\n        signal_strength: row.signal_strength\n      },\n      contacts: []\n    };\n  }\n\n  const exists = aggregatedData[row.account_id].contacts.find(c => c.contact_id === row.contact_id);\n  if (!exists && row.contact_id) {\n    aggregatedData[row.account_id].contacts.push({\n      contact_id: row.contact_id,\n      contact_name: row.contact_name,\n      job_role: row.job_role\n    });\n  }\n}\n\nreturn Object.values(aggregatedData).map(data => ({ json: data }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [368, 224],
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Aggregate Context"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a B2B sales qualification expert.\n\nEvaluate the target company using the provided company data and market signal data against the defined Ideal Customer Profile (ICP).\n\nIMPORTANT:\n- Return ONLY one valid JSON object.\n- Do NOT use Markdown.\n- Do NOT wrap the JSON in ```json.\n- Do NOT include any explanation before or after the JSON.\n- The \"tier\" value MUST be exactly one uppercase letter: \"A\", \"B\", or \"C\".\n- account_id and signal_id MUST be copied exactly from the input data. Do not modify, invent, or omit them.\n- fit_score and timing_score MUST be integers between 0 and 100.\n- total_score MUST be the EXACT SUM of fit_score and timing_score: total_score = fit_score + timing_score.\n- You MUST include the full original company and signal data inside the output JSON exactly as provided in the input without omitting any fields.\n\n=== COMPANY DATA ===\n\nAccount ID: {{ $json.account.account_id }}\nCompany Name: {{ $json.account.account_name }}\nDomain: {{ $json.account.domain }}\nIndustry: {{ $json.account.industry }}\nCompany Size: {{ $json.account.company_size }}\nGeography: {{ $json.account.geography }}\nGrowth Stage: {{ $json.account.growth_stage }}\nTech Stack: {{ $json.account.tech_stack }}\n\n=== MARKET SIGNAL ===\n\nSignal ID: {{ $json.signal.signal_id }}\nSignal Type: {{ $json.signal.signal_type }}\nDetected Date: {{ $json.signal.detected_date }}\nSignal Strength: {{ $json.signal.signal_strength }}\nEvidence Description: {{ $json.signal.evidence_description }}\nEvidence URL: {{ $json.signal.evidence_url }}\n\n=== OUR ICP ===\n\n- Target Industries: SaaS, Software, Fintech, E-commerce\n- Company Size: 11-500 employees\n- Geography: MENA region preferred; other regions receive partial fit score\n- Growth Stage: Series A or later\n\n=== SCORING RULES ===\n\n1. fit_score (0-100):\n   Evaluate how strongly the company matches the ICP based on:\n   - Industry\n   - Company size\n   - Geography\n   - Growth stage\n\n2. timing_score (0-100):\n   Evaluate the strength and relevance of the market signal based on:\n   - Signal relevance\n   - Signal strength\n   - Recency of the detected date (last 30 days = high)\n   - Evidence provided\n\n3. total_score:\n   total_score = fit_score + timing_score\n\n4. Tier (based on total_score AND fit_score):\n   - Tier A: total_score >= 150 AND fit_score >= 70\n   - Tier B: total_score >= 100 (and not Tier A)\n   - Tier C: total_score < 100\n\n5. justification:\n   Provide EXACTLY two sentences.\n   - Sentence 1 explains the reason for the fit_score.\n   - Sentence 2 explains the reason for the timing_score.\n\n=== REQUIRED JSON FORMAT ===\n\n{\n  \"account_id\": <copy exactly from input>,\n  \"signal_id\": <copy exactly from input>,\n  \"company\": {\n    \"name\": <copy exactly from input>,\n    \"domain\": <copy exactly from input>,\n    \"industry\": <copy exactly from input>,\n    \"size\": <copy exactly from input>,\n    \"geography\": <copy exactly from input>,\n    \"growth_stage\": <copy exactly from input>,\n    \"technology\": <copy exactly from input>\n  },\n  \"signal\": {\n    \"type\": <copy exactly from input>,\n    \"detected_date\": <copy exactly from input>,\n    \"strength\": <copy exactly from input>,\n    \"evidence_description\": <copy exactly from input>,\n    \"evidence_url\": <copy exactly from input>\n  },\n  \"fit_score\": <integer 0-100>,\n  \"timing_score\": <integer 0-100>,\n  \"total_score\": <integer>,\n  \"tier\": \"<A, B, or C>\",\n  \"justification\": \"<exactly 2 sentences>\"\n}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [544, 224],
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Fit & Timing Scoring"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [544, 400],
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "dpUv5XVsaQjq2jnf",
+          "name": "OpenAI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const cleaned = String(item.json.text).replace(/```json|```/g, '').trim();\n  const p = JSON.parse(cleaned);\n\n  const fit = parseInt(p.fit_score, 10) || 0;\n  const timing = parseInt(p.timing_score, 10) || 0;\n  const total = fit + timing;\n\n  // Recompute tier in code so the routing never depends on the LLM's arithmetic\n  let tier = 'C';\n  if (total >= 150 && fit >= 70) tier = 'A';\n  else if (total >= 100) tier = 'B';\n\n  return {\n    json: {\n      ...p,\n      fit_score: fit,\n      timing_score: timing,\n      total_score: total,\n      tier\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [912, 224],
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Parse Scoring JSON"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "scores",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_id": "={{ $json.account_id }}",
+            "signal_id": "={{ $json.signal_id }}",
+            "fit_score": "={{ $json.fit_score }}",
+            "timing_score": "={{ $json.timing_score }}",
+            "total_score": "={{ $json.total_score }}",
+            "tier": "={{ $json.tier }}",
+            "justification": "={{ $json.justification }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [1120, 48],
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Insert Scores",
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "12df687f-346a-4cfc-95f2-e3aed9c768e8",
+              "leftValue": "={{ $json.tier }}",
+              "rightValue": "C",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": false
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1120, 288],
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "If Tier Not C"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "accounts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_id": "={{ $json.account_id }}",
+            "status": "Disqualified_Low_Score"
+          },
+          "matchingColumns": ["account_id"],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [1424, 432],
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "Set Disqualified_Low_Score",
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a strict B2B research analyst.\n\nINPUT DATA:\n- account_id: {{ $json.account_id }}\n- signal_id: {{ $json.signal_id }}\n- source_data: {{ JSON.stringify({ company: $json.company, signal: $json.signal }) }}\n\nTASK:\nProduce a research brief with UP TO 3 facts.\nEach fact MUST be a direct restatement of information explicitly present in source_data.\nIf source_data contains fewer than 3 distinct facts, output only as many facts as exist.\nIf zero facts exist, set \"research_brief\" to [].\n\nRULES:\n- Do NOT invent, infer, extrapolate, assume, or calculate.\n- Do NOT use external knowledge.\n- Do NOT claim external verification.\n- If account_id or signal_id is missing, set it to null.\n- Return ONLY one valid JSON object. No Markdown. No prose.\n\nOUTPUT SCHEMA:\n{\n  \"account_id\": <string or null>,\n  \"signal_id\": <string or null>,\n  \"research_brief\": [<string>, ...]\n}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [1424, 144],
+      "id": "a1000000-0000-4000-8000-000000000010",
+      "name": "Research Brief Chain"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [1440, 0],
+      "id": "a1000000-0000-4000-8000-000000000011",
+      "name": "OpenAI Chat Model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "dpUv5XVsaQjq2jnf",
+          "name": "OpenAI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  let p = {};\n  try {\n    p = JSON.parse(String(item.json.text).replace(/```json|```/g, '').trim());\n  } catch (e) {\n    p = {};\n  }\n  const facts = Array.isArray(p.research_brief) ? p.research_brief : [];\n  return {\n    json: {\n      account_id: p.account_id,\n      signal_id: p.signal_id,\n      fact_1: facts[0] ?? null,\n      fact_2: facts[1] ?? null,\n      fact_3: facts[2] ?? null\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1776, 144],
+      "id": "a1000000-0000-4000-8000-000000000012",
+      "name": "Parse Brief JSON"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "research_briefs",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_id": "={{ $json.account_id }}",
+            "signal_id": "={{ $json.signal_id }}",
+            "brief_text": "={{ [$json.fact_1, $json.fact_2, $json.fact_3].filter(Boolean).join('\\n') }}",
+            "fact_1": "={{ $json.fact_1 }}",
+            "fact_2": "={{ $json.fact_2 }}",
+            "fact_3": "={{ $json.fact_3 }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [2000, 144],
+      "id": "a1000000-0000-4000-8000-000000000013",
+      "name": "Insert Research Brief",
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "accounts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_id": "={{ $('Parse Brief JSON').item.json.account_id }}",
+            "status": "Ready_for_Messaging"
+          },
+          "matchingColumns": ["account_id"],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [2224, 144],
+      "id": "a1000000-0000-4000-8000-000000000014",
+      "name": "Set Account Ready_for_Messaging",
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "signals",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "signal_id": "={{ $('Parse Brief JSON').item.json.signal_id }}",
+            "status": "Ready_for_Messaging"
+          },
+          "matchingColumns": ["signal_id"],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [2448, 144],
+      "id": "a1000000-0000-4000-8000-000000000015",
+      "name": "Set Signal Ready_for_Messaging",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "postgres": {
+          "id": "cUTtq8Y22C13cCz5",
+          "name": "Postgres account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [[{ "node": "Execute a SQL query", "type": "main", "index": 0 }]]
+    },
+    "Execute a SQL query": {
+      "main": [[{ "node": "Aggregate Context", "type": "main", "index": 0 }]]
+    },
+    "Aggregate Context": {
+      "main": [[{ "node": "Fit & Timing Scoring", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [[{ "node": "Fit & Timing Scoring", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Fit & Timing Scoring": {
+      "main": [[{ "node": "Parse Scoring JSON", "type": "main", "index": 0 }]]
+    },
+    "Parse Scoring JSON": {
+      "main": [[
+        { "node": "Insert Scores", "type": "main", "index": 0 },
+        { "node": "If Tier Not C", "type": "main", "index": 0 }
+      ]]
+    },
+    "If Tier Not C": {
+      "main": [
+        [{ "node": "Research Brief Chain", "type": "main", "index": 0 }],
+        [{ "node": "Set Disqualified_Low_Score", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [[{ "node": "Research Brief Chain", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Research Brief Chain": {
+      "main": [[{ "node": "Parse Brief JSON", "type": "main", "index": 0 }]]
+    },
+    "Parse Brief JSON": {
+      "main": [[{ "node": "Insert Research Brief", "type": "main", "index": 0 }]]
+    },
+    "Insert Research Brief": {
+      "main": [[{ "node": "Set Account Ready_for_Messaging", "type": "main", "index": 0 }]]
+    },
+    "Set Account Ready_for_Messaging": {
+      "main": [[{ "node": "Set Signal Ready_for_Messaging", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}
